@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>2D テトリス</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #1a1a2e;
+    --border: #33334d;
+    --text: #e8e8f0;
+    --accent: #6c63ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .app {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+  }
+  canvas {
+    background: #000;
+    border: 3px solid var(--border);
+    border-radius: 6px;
+    display: block;
+  }
+  .side {
+    width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .panel h3 {
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: #9d9dc7;
+    text-transform: uppercase;
+  }
+  .panel .value {
+    font-size: 22px;
+    font-weight: 700;
+  }
+  #next {
+    background: #000;
+    border-radius: 6px;
+    display: block;
+    margin: 0 auto;
+  }
+  .keys {
+    font-size: 12px;
+    line-height: 1.7;
+    color: #b9b9d6;
+  }
+  .keys b { color: var(--text); }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+    text-align: center;
+  }
+  #overlay h1 { margin: 0; font-size: 28px; }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <canvas id="board" width="300" height="600"></canvas>
+  <div class="side">
+    <div class="panel">
+      <h3>スコア</h3>
+      <div class="value" id="score">0</div>
+    </div>
+    <div class="panel">
+      <h3>レベル</h3>
+      <div class="value" id="level">1</div>
+    </div>
+    <div class="panel">
+      <h3>ライン</h3>
+      <div class="value" id="lines">0</div>
+    </div>
+    <div class="panel">
+      <h3>ネクスト</h3>
+      <canvas id="next" width="120" height="120"></canvas>
+    </div>
+    <div class="panel keys">
+      <div><b>←/→</b> 移動</div>
+      <div><b>↓</b> ソフトドロップ</div>
+      <div><b>↑</b> 回転</div>
+      <div><b>Space</b> ハードドロップ</div>
+      <div><b>P</b> 一時停止</div>
+    </div>
+  </div>
+</div>
+
+<div id="overlay">
+  <h1 id="overlayTitle">ゲームオーバー</h1>
+  <div id="overlayScore"></div>
+  <button id="restartBtn">もう一度プレイ</button>
+</div>
+
+<script>
+(() => {
+  const COLS = 10, ROWS = 20, CELL = 30;
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const nextCanvas = document.getElementById('next');
+  const nctx = nextCanvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlayTitle');
+  const overlayScore = document.getElementById('overlayScore');
+  const restartBtn = document.getElementById('restartBtn');
+  const scoreEl = document.getElementById('score');
+  const levelEl = document.getElementById('level');
+  const linesEl = document.getElementById('lines');
+
+  const COLORS = {
+    I: '#4dd9ec', O: '#f4e04d', T: '#c95df2',
+    S: '#6be36b', Z: '#f25757', J: '#5b7bf2', L: '#f2a35b'
+  };
+
+  const SHAPES = {
+    I: [[0,1],[1,1],[2,1],[3,1]],
+    O: [[1,0],[2,0],[1,1],[2,1]],
+    T: [[1,0],[0,1],[1,1],[2,1]],
+    S: [[1,0],[2,0],[0,1],[1,1]],
+    Z: [[0,0],[1,0],[1,1],[2,1]],
+    J: [[0,0],[0,1],[1,1],[2,1]],
+    L: [[2,0],[0,1],[1,1],[2,1]],
+  };
+
+  const TYPES = Object.keys(SHAPES);
+
+  function rotateCells(cells) {
+    // rotate around a pivot approx center (using 4x4 box logic simplified)
+    const size = 4;
+    return cells.map(([x, y]) => [size - 1 - y, x]);
+  }
+
+  function newPiece(type) {
+    const base = SHAPES[type].map(c => c.slice());
+    return { type, cells: base, x: 3, y: 0, color: COLORS[type] };
+  }
+
+  function randomType() {
+    return TYPES[Math.floor(Math.random() * TYPES.length)];
+  }
+
+  let grid, current, next, score, level, lines, dropInterval, dropTimer, gameOver, paused, rafId, lastTime;
+
+  function initGrid() {
+    grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  }
+
+  function resetState() {
+    initGrid();
+    score = 0; level = 1; lines = 0;
+    dropInterval = 1000;
+    dropTimer = 0;
+    gameOver = false;
+    paused = false;
+    current = newPiece(randomType());
+    next = newPiece(randomType());
+    updateHud();
+    overlay.style.display = 'none';
+  }
+
+  function updateHud() {
+    scoreEl.textContent = score;
+    levelEl.textContent = level;
+    linesEl.textContent = lines;
+  }
+
+  function absoluteCells(piece) {
+    return piece.cells.map(([cx, cy]) => [piece.x + cx, piece.y + cy]);
+  }
+
+  function collides(piece, dx, dy, cells) {
+    const testCells = (cells || piece.cells).map(([cx, cy]) => [piece.x + cx + dx, piece.y + cy + dy]);
+    for (const [x, y] of testCells) {
+      if (x < 0 || x >= COLS || y >= ROWS) return true;
+      if (y >= 0 && grid[y][x]) return true;
+    }
+    return false;
+  }
+
+  function lockPiece() {
+    for (const [x, y] of absoluteCells(current)) {
+      if (y < 0) {
+        endGame();
+        return;
+      }
+      grid[y][x] = current.color;
+    }
+    clearLines();
+    current = next;
+    next = newPiece(randomType());
+    if (collides(current, 0, 0)) {
+      endGame();
+    }
+  }
+
+  function clearLines() {
+    let cleared = 0;
+    for (let y = ROWS - 1; y >= 0; y--) {
+      if (grid[y].every(cell => cell)) {
+        grid.splice(y, 1);
+        grid.unshift(Array(COLS).fill(null));
+        cleared++;
+        y++;
+      }
+    }
+    if (cleared > 0) {
+      const points = [0, 100, 300, 500, 800][cleared] || 800;
+      score += points * level;
+      lines += cleared;
+      level = Math.floor(lines / 10) + 1;
+      dropInterval = Math.max(120, 1000 - (level - 1) * 80);
+      updateHud();
+    }
+  }
+
+  function tryMove(dx, dy) {
+    if (!collides(current, dx, dy)) {
+      current.x += dx;
+      current.y += dy;
+      return true;
+    }
+    return false;
+  }
+
+  function tryRotate() {
+    const rotated = rotateCells(current.cells);
+    const kicks = [0, -1, 1, -2, 2];
+    for (const k of kicks) {
+      if (!collides(current, k, 0, rotated)) {
+        current.cells = rotated;
+        current.x += k;
+        return;
+      }
+    }
+  }
+
+  function hardDrop() {
+    let dist = 0;
+    while (!collides(current, 0, dist + 1)) dist++;
+    current.y += dist;
+    score += dist * 2;
+    lockPiece();
+    updateHud();
+  }
+
+  function softDrop() {
+    if (!tryMove(0, 1)) {
+      lockPiece();
+    } else {
+      score += 1;
+      updateHud();
+    }
+    dropTimer = 0;
+  }
+
+  function endGame() {
+    gameOver = true;
+    overlayTitle.textContent = 'ゲームオーバー';
+    overlayScore.textContent = `スコア: ${score} / ライン: ${lines}`;
+    overlay.style.display = 'flex';
+  }
+
+  function drawCell(c, x, y, color) {
+    c.fillStyle = color;
+    c.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+    c.strokeStyle = 'rgba(255,255,255,0.15)';
+    c.strokeRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // grid background lines
+    ctx.strokeStyle = '#141428';
+    for (let x = 0; x <= COLS; x++) {
+      ctx.beginPath(); ctx.moveTo(x * CELL, 0); ctx.lineTo(x * CELL, ROWS * CELL); ctx.stroke();
+    }
+    for (let y = 0; y <= ROWS; y++) {
+      ctx.beginPath(); ctx.moveTo(0, y * CELL); ctx.lineTo(COLS * CELL, y * CELL); ctx.stroke();
+    }
+    // locked cells
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (grid[y][x]) drawCell(ctx, x, y, grid[y][x]);
+      }
+    }
+    // ghost piece
+    let ghostY = 0;
+    while (!collides(current, 0, ghostY + 1)) ghostY++;
+    ctx.globalAlpha = 0.25;
+    for (const [x, y] of absoluteCells(current)) {
+      drawCell(ctx, x, y + ghostY, current.color);
+    }
+    ctx.globalAlpha = 1;
+    // current piece
+    for (const [x, y] of absoluteCells(current)) {
+      if (y >= 0) drawCell(ctx, x, y, current.color);
+    }
+    // next piece preview
+    nctx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
+    const cellSize = 24;
+    const offsetX = (nextCanvas.width - 4 * cellSize) / 2;
+    const offsetY = (nextCanvas.height - 4 * cellSize) / 2;
+    for (const [cx, cy] of next.cells) {
+      nctx.fillStyle = next.color;
+      nctx.fillRect(offsetX + cx * cellSize + 1, offsetY + cy * cellSize + 1, cellSize - 2, cellSize - 2);
+    }
+    if (paused && !gameOver) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 24px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('一時停止中', canvas.width / 2, canvas.height / 2);
+    }
+  }
+
+  function loop(time) {
+    if (!lastTime) lastTime = time;
+    const delta = time - lastTime;
+    lastTime = time;
+    if (!gameOver && !paused) {
+      dropTimer += delta;
+      if (dropTimer > dropInterval) {
+        if (!tryMove(0, 1)) lockPiece();
+        dropTimer = 0;
+      }
+    }
+    draw();
+    rafId = requestAnimationFrame(loop);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (gameOver) return;
+    if (e.code === 'KeyP') {
+      paused = !paused;
+      return;
+    }
+    if (paused) return;
+    switch (e.code) {
+      case 'ArrowLeft': tryMove(-1, 0); e.preventDefault(); break;
+      case 'ArrowRight': tryMove(1, 0); e.preventDefault(); break;
+      case 'ArrowDown': softDrop(); e.preventDefault(); break;
+      case 'ArrowUp': tryRotate(); e.preventDefault(); break;
+      case 'Space': hardDrop(); e.preventDefault(); break;
+    }
+  });
+
+  restartBtn.addEventListener('click', () => {
+    resetState();
+  });
+
+  resetState();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
